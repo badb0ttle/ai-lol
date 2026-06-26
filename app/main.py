@@ -14,6 +14,7 @@ import httpx
 from app.config import settings
 import aio_pika
 from uuid import uuid4
+from sqlalchemy import IntegrityError, select as sa_select
 
 
 # 生命周期管理
@@ -53,6 +54,7 @@ class ChatRequest(BaseModel):
 class TaskRequest(BaseModel):
     instruction: str  # 任务指令
     context: str = ""  # 补充上下文
+    idempotent_key: str | None = None
 
 
 # 路由
@@ -98,9 +100,41 @@ async def chat_stream(req: ChatRequest):
 async def submit_task(req: TaskRequest, request: Request):
     task_id = str(uuid4())
     async with async_session() as db:
-        task = Task(id=task_id, instruction=req.instruction, context=req.context)
-        db.add(task)
-        await db.commit()
+        if req.idempotent_key:
+            redis_client = request.app.state.redis
+            existing = await redis_client.set(
+                f"idempotent:{req.idempotent_key}",
+                "1",
+                nx=True,
+                ex=86400,
+            )
+            if not existing:
+                result = await db.execute(
+                    sa_select(Task).where(Task.idempotent_key == req.idempotent_key)
+                )
+                dup_task = result.scalar_one_or_none()
+                if dup_task:
+                    return {"status": "duplicate", "task_id": dup_task.id}
+
+        try:
+            task = Task(
+                id=task_id,
+                instruction=req.instruction,
+                context=req.context,
+                idempotent_key=req.idempotent_key,
+            )
+            db.add(task)
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            if req.idempotent_key:
+                result = await db.execute(
+                    sa_select(Task).where(Task.idempotent_key == req.idempotent_key)
+                )
+                dup_task = result.scalar_one_or_none()
+                if dup_task:
+                    return {"status": "duplicate", "task_id": dup_task.id}
+            raise
 
     channel = request.app.state.rmq_channel
     await channel.default_exchange.publish(

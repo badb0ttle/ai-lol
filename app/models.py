@@ -7,6 +7,7 @@ from sqlalchemy.orm import Mapped, relationship, mapped_column
 
 from app.db import Base
 
+
 # 消息角色枚举
 class MessageRole(str, enum.Enum):
     user = "user"
@@ -60,6 +61,9 @@ class Task(Base):
 
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    idempotent_key: Mapped[str | None] = mapped_column(
+        String(128), unique=True, nullable=True, default=None
     )
     instruction: Mapped[str] = mapped_column(Text)
     context: Mapped[str] = mapped_column(Text, default="")

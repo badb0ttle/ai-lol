@@ -18,6 +18,11 @@ async def process_message(message: aio_pika.IncomingMessage) -> None:
 
         async with async_session() as db:
             task = await db.get(Task, task_id)
+            if task is not None and task.status in (
+                TaskStatus.success,
+                TaskStatus.running,
+            ):
+                return
             if task is None:
                 task = Task(
                     id=task_id,
@@ -34,7 +39,11 @@ async def process_message(message: aio_pika.IncomingMessage) -> None:
 
         try:
             async with async_session() as db:
-                result = await run_agent(instruction, context, db, task_id)
+                # 任务超时
+                result = await asyncio.wait_for(
+                    run_agent(instruction, context, db, task_id),
+                    timeout=settings.task_timeout,
+                )
 
             async with async_session() as db:
                 task = await db.get(Task, task_id)

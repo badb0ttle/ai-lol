@@ -134,6 +134,7 @@ BASE_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 
 
 async def execute_tool(name: str, args: dict[str, Any]) -> Any:
+    # 防路径穿越
     if name == "file_reader":
         path = str(args.get("path", ""))
         full = os.path.normpath(os.path.join(BASE_DIR, path))
@@ -240,8 +241,16 @@ async def run_agent(
                         ),
                         tool_name=tool_name,
                     )
+                    # 工具重试
+                    for attempt in range(2):
+                        try:
+                            tool_result = await execute_tool(tool_name, parsed_arguments)
+                            break
+                        except Exception as e:
+                            if attempt == 1:
+                                tool_result = {"error": f"工具 {tool_name} 重试 2 次均失败: {str(e)}"}
 
-                    tool_result = await execute_tool(tool_name, parsed_arguments)
+                    
                     await record_step(
                         db_session,
                         task_id,
