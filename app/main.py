@@ -84,7 +84,7 @@ async def chat_stream(req: ChatRequest):
 
 
 @router.post("/tasks")
-async def submit_task(req: TaskRequest):
+async def submit_task(req: TaskRequest, request: Request):
     task_id = str(uuid4()) 
     channel = request.app.state.rmq_channel
     await channel.default_exchange.publish(
