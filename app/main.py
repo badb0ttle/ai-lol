@@ -8,12 +8,13 @@ from fastapi import HTTPException
 import json
 import redis.asyncio as aioredis
 
-from app.db import async_session,engine, Base
+from app.db import async_session, engine, Base
 from app.models import Task
 import httpx
 from app.config import settings
 import aio_pika
-from uuid import uuid4  
+from uuid import uuid4
+
 
 # 生命周期管理
 @asynccontextmanager
@@ -39,24 +40,25 @@ async def lifespan(app: FastAPI):
     await redis.aclose()
     await engine.dispose()
 
-app = FastAPI(lifespan=lifespan)
 
+app = FastAPI(lifespan=lifespan)
 
 
 # 请求模型
 class ChatRequest(BaseModel):
     model: str = settings.llm_model
-    messages: list[dict] # 对话历史
+    messages: list[dict]  # 对话历史
 
-    
+
 class TaskRequest(BaseModel):
-    instruction: str # 任务指令
-    context: str = "" # 补充上下文
+    instruction: str  # 任务指令
+    context: str = ""  # 补充上下文
 
 
 # 路由
 router = APIRouter()
 app.include_router(router)
+
 
 @app.get("/health")
 async def health():
@@ -73,8 +75,8 @@ async def chat(req: ChatRequest):
         )
         resp.raise_for_status()
         return resp.json()
-    
-    
+
+
 @router.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
     async def event_generator():
@@ -88,12 +90,13 @@ async def chat_stream(req: ChatRequest):
                 async for line in resp.aiter_lines():
                     if line.startswith("data: "):
                         yield f"data: {line[6:]}\n\n"
+
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.post("/tasks")
 async def submit_task(req: TaskRequest, request: Request):
-    task_id = str(uuid4()) 
+    task_id = str(uuid4())
     async with async_session() as db:
         task = Task(id=task_id, instruction=req.instruction, context=req.context)
         db.add(task)
@@ -140,5 +143,3 @@ async def get_task(task_id: str):
             "created_at": task.created_at.isoformat(),
             "updated_at": task.updated_at.isoformat(),
         }
-
-

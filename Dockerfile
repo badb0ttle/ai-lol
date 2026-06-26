@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pyproject.toml ./
 COPY app/ ./app/
+COPY data/ ./data/
 
 RUN pip install --no-cache-dir --upgrade pip && \
 	pip install --no-cache-dir .
@@ -24,4 +25,4 @@ COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 COPY app/ ./app/
-
+COPY data/ ./data/

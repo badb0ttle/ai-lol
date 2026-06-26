@@ -1,5 +1,6 @@
 import ast
 import json
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -50,7 +51,23 @@ TOOLS = [
             },
         },
     },
-
+    {
+        "type": "function",
+        "function": {
+            "name": "file_reader",
+            "description": "读取 data 目录下的文件内容",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "相对 data 目录的文件路径",
+                    }
+                },
+                "required": ["path"],
+            },
+        },
+    },
 ]
 
 
@@ -113,15 +130,26 @@ async def record_step(
     await db_session.commit()
 
 
+BASE_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+
+
 async def execute_tool(name: str, args: dict[str, Any]) -> Any:
-    
+    if name == "file_reader":
+        path = str(args.get("path", ""))
+        full = os.path.normpath(os.path.join(BASE_DIR, path))
+        if not full.startswith(os.path.normpath(BASE_DIR) + os.sep):
+            raise ValueError("路径越界")
+        with open(full) as f:
+            content = f.read()[:5000]
+        return {"path": path, "content": content}
+
     if name == "fetch_url":
         url = str(args.get("url", ""))
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(url, follow_redirects=True)
             text = resp.text[:2000]
         return {"url": url, "status": resp.status_code, "text_preview": text}
-    
+
     if name == "get_current_time":
         return {"current_time": _utc_now_text()}
 
@@ -130,7 +158,7 @@ async def execute_tool(name: str, args: dict[str, Any]) -> Any:
         if not expression.strip():
             raise ValueError("expression is required")
         return {"expression": expression, "result": _safe_calculate(expression)}
-    
+
     raise ValueError(f"unsupported tool: {name}")
 
 
