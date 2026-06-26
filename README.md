@@ -83,7 +83,7 @@ Redis SET NX 前置 + PostgreSQL UNIQUE 后置
 git clone <repo-url> && cd hjh-ai-lol
 
 # 2. 配置环境变量
-cp .env.example .env
+cp .env.example .env.dev
 # 编辑 .env，填入 LLM API Key
 
 # 3. 一条命令启动
