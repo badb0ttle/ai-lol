@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from fastapi import Request
 from fastapi import HTTPException
 import json
+from datetime import datetime
 import redis.asyncio as aioredis
 
 from app.db import async_session, engine, Base
@@ -99,6 +100,7 @@ async def chat_stream(req: ChatRequest):
 @router.post("/tasks")
 async def submit_task(req: TaskRequest, request: Request):
     task_id = str(uuid4())
+    now = datetime.utcnow().isoformat()
     async with async_session() as db:
         if req.idempotent_key:
             redis_client = request.app.state.redis
@@ -150,17 +152,39 @@ async def submit_task(req: TaskRequest, request: Request):
         ),
         routing_key="ai_tasks",
     )
-    await request.app.state.redis.setex(f"task:{task_id}", 3600, "queued")
+    await request.app.state.redis.setex(
+        f"task:{task_id}",
+        3600,
+        json.dumps(
+            {
+                "task_id": task_id,
+                "status": "queued",
+                "result": None,
+                "error": None,
+                "steps": [],
+                "created_at": now,
+                "updated_at": now,
+            },
+            ensure_ascii=False,
+        ),
+    )
     return {"status": "queued", "task_id": task_id}
 
 
 @router.get("/tasks/{task_id}")
-async def get_task(task_id: str):
+async def get_task(task_id: str, request: Request):
+    redis_client = request.app.state.redis
+    cached = await redis_client.get(f"task:{task_id}")
+    if cached:
+        try:
+            return json.loads(cached)
+        except json.JSONDecodeError:
+            await redis_client.delete(f"task:{task_id}")
     async with async_session() as db:
         task = await db.get(Task, task_id)
         if not task:
             raise HTTPException(status_code=404, detail="task not found")
-        return {
+        result = {
             "task_id": task.id,
             "status": task.status.value,
             "result": task.result,
@@ -177,3 +201,7 @@ async def get_task(task_id: str):
             "created_at": task.created_at.isoformat(),
             "updated_at": task.updated_at.isoformat(),
         }
+        await redis_client.setex(
+            f"task:{task_id}", 300, json.dumps(result, ensure_ascii=False)
+        )
+        return result

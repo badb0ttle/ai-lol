@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import aio_pika
+import redis.asyncio as aioredis
 
 from app.agent_core import run_agent
 from app.config import settings
@@ -9,7 +10,10 @@ from app.db import async_session
 from app.models import Task, TaskStatus
 
 
-async def process_message(message: aio_pika.IncomingMessage) -> None:
+async def process_message(
+    message: aio_pika.IncomingMessage,
+    redis_client: aioredis.Redis,
+) -> None:
     async with message.process():
         body = json.loads(message.body.decode())
         task_id = body["task_id"]
@@ -36,6 +40,7 @@ async def process_message(message: aio_pika.IncomingMessage) -> None:
                 task.context = context
                 task.status = TaskStatus.running
             await db.commit()
+            await redis_client.delete(f"task:{task_id}")
 
         try:
             async with async_session() as db:
@@ -52,6 +57,7 @@ async def process_message(message: aio_pika.IncomingMessage) -> None:
                 task.status = TaskStatus.success
                 task.result = result
                 await db.commit()
+                await redis_client.delete(f"task:{task_id}")
         except Exception as exc:
             async with async_session() as db:
                 task = await db.get(Task, task_id)
@@ -59,19 +65,33 @@ async def process_message(message: aio_pika.IncomingMessage) -> None:
                     task.status = TaskStatus.failed
                     task.error = str(exc)
                     await db.commit()
+                    await redis_client.delete(f"task:{task_id}")
+
+
+async def consume_message(
+    message: aio_pika.IncomingMessage,
+    redis_client: aioredis.Redis,
+) -> None:
+    await process_message(message, redis_client)
 
 
 async def main() -> None:
+    redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
     conn = await aio_pika.connect_robust(settings.amqp_url)
     channel = await conn.channel()
     await channel.set_qos(prefetch_count=1)
     queue = await channel.declare_queue("ai_tasks", durable=True)
-    await queue.consume(process_message)
+
+    async def on_message(message: aio_pika.IncomingMessage) -> None:
+        await consume_message(message, redis_client)
+
+    await queue.consume(on_message)
 
     try:
         await asyncio.Future()
     finally:
         await conn.close()
+        await redis_client.aclose()
 
 
 if __name__ == "__main__":
