@@ -36,6 +36,21 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_url",
+            "description": "从指定 URL 抓取网页内容，返回文本摘要",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "目标网页 URL"}
+                },
+                "required": ["url"],
+            },
+        },
+    },
+
 ]
 
 
@@ -99,6 +114,14 @@ async def record_step(
 
 
 async def execute_tool(name: str, args: dict[str, Any]) -> Any:
+    
+    if name == "fetch_url":
+        url = str(args.get("url", ""))
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, follow_redirects=True)
+            text = resp.text[:2000]
+        return {"url": url, "status": resp.status_code, "text_preview": text}
+    
     if name == "get_current_time":
         return {"current_time": _utc_now_text()}
 
@@ -107,7 +130,7 @@ async def execute_tool(name: str, args: dict[str, Any]) -> Any:
         if not expression.strip():
             raise ValueError("expression is required")
         return {"expression": expression, "result": _safe_calculate(expression)}
-
+    
     raise ValueError(f"unsupported tool: {name}")
 
 

@@ -12,18 +12,25 @@ from app.models import Task, TaskStatus
 async def process_message(message: aio_pika.IncomingMessage) -> None:
     async with message.process():
         body = json.loads(message.body.decode())
+        task_id = body["task_id"]
         instruction = body["instruction"]
         context = body.get("context", "")
 
         async with async_session() as db:
-            task = Task(
-                instruction=instruction,
-                context=context,
-                status=TaskStatus.running,
-            )
-            db.add(task)
+            task = await db.get(Task, task_id)
+            if task is None:
+                task = Task(
+                    id=task_id,
+                    instruction=instruction,
+                    context=context,
+                    status=TaskStatus.running,
+                )
+                db.add(task)
+            else:
+                task.instruction = instruction
+                task.context = context
+                task.status = TaskStatus.running
             await db.commit()
-            task_id = task.id
 
         try:
             async with async_session() as db:
