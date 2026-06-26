@@ -1,0 +1,55 @@
+services:
+	postgres:
+		image: postgres:16-alpine
+		environment:
+			POSTGRES_USER: dev
+			POSTGRES_PASSWORD: devpass123
+			POSTGRES_DB: ai_tasks
+		ports:
+			- "5432:5432"
+		volumes:
+			- pgdata:/var/lib/postgresql/data
+		healthcheck:
+			test: ["CMD-SHELL", "pg_isready -U dev -d ai_tasks"]
+			interval: 5s
+			retries: 5
+
+	rabbitmq:
+		image: rabbitmq:4-management-alpine
+		environment:
+			RABBITMQ_DEFAULT_USER: dev
+			RABBITMQ_DEFAULT_PASS: devpass123
+		ports:
+			- "5672:5672"
+			- "15672:15672"
+		healthcheck:
+			test: ["CMD-SHELL", "rabbitmq-diagnostics check_running"]
+			interval: 5s
+			retries: 5
+
+	api:
+		build: .
+		ports:
+			- "8000:8000"
+		env_file:
+			- .env.dev
+		depends_on:
+			postgres:
+				condition: service_healthy
+			rabbitmq:
+				condition: service_healthy
+		command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+	worker:
+		build: .
+		env_file:
+			- .env.dev
+		depends_on:
+			postgres:
+				condition: service_healthy
+			rabbitmq:
+				condition: service_healthy
+		command: python -m app.worker
+
+volumes:
+	pgdata:
