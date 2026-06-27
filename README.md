@@ -248,7 +248,7 @@ curl http://localhost:8000/tasks/{task_id}
 
 ```bash
 # 连接数据库
-docker exec hjh-ai-lol-postgres-1 psql -U dev -d ai_tasks
+docker exec -it ai-lol-postgres-1 psql -U dev -d ai_tasks
 
 # 1. 所有会话
 SELECT id, title, created_at FROM conversations ORDER BY created_at DESC;
@@ -381,7 +381,7 @@ curl -X POST http://localhost:8000/tasks \
 curl http://localhost:8000/tasks/xxx-...
 
 # 4. 查看 Worker 实时日志
-docker logs -f hjh-ai-lol-worker-1
+docker-compose logs -f worker
 
 # 5. 幂等验证
 curl -X POST http://localhost:8000/tasks \
@@ -390,12 +390,8 @@ curl -X POST http://localhost:8000/tasks \
 # 第二次同 key → {"status":"duplicate","task_id":"..."}
 
 # 6. 数据库全链路审计
-docker exec hjh-ai-lol-postgres-1 psql -U dev -d ai_tasks \
+docker exec ai-lol-postgres-1 psql -U dev -d ai_tasks \
   -c "SELECT seq, type, tool_name, SUBSTRING(content,1,100) FROM task_steps WHERE task_id='xxx' ORDER BY seq;"
-
-# 7. 一键全流程
-./demo.sh
-```
 
 ---
 
@@ -419,9 +415,3 @@ docker exec hjh-ai-lol-postgres-1 psql -U dev -d ai_tasks \
 4. **LLM 单一 provider**：仅 DeepSeek。生产需抽象 `BaseLLMProvider` + fallback
 5. **无监控**：无 Prometheus/Grafana。需补齐队列深度、延迟、失败率仪表盘
 6. **Tool sandbox 有限**：`run_command` 白名单 + 路径限制。生产需 Firecracker/gVisor 沙箱
-
----
-
-## License
-
-MIT
