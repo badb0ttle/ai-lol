@@ -8,10 +8,10 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-v4-flash"
 
     # Database
-    database_url: str = "postgresql+asyncpg://dev:devpass123@localhost:5432/ai_tasks"
+    database_url: str = "postgresql+asyncpg://dev:devpass123@localhost:5432/ai_tasks" # postgresql+asyncpg://user:password@hostname:port/dbname
 
     # Redis
-    redis_url: str = "redis://localhost:6379/0"
+    redis_url: str = "redis://localhost:6379/0" # redis://:password@hostname:port/db_number
 
     # RabbitMQ
     amqp_url: str = "amqp://dev:devpass123@localhost:5672/"

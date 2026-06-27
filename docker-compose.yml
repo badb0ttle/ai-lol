@@ -44,8 +44,8 @@ services:
       - .env.dev
     environment:
       DATABASE_URL: postgresql+asyncpg://dev:devpass123@postgres:5432/ai_tasks
-      REDIS_URL: redis://redis:6379/0
-      AMQP_URL: amqp://dev:devpass123@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379/0 # redis://:password@hostname:port/db_number
+      AMQP_URL: amqp://dev:devpass123@rabbitmq:5672/ # rabbitmq://user:password@hostname:port/vhost
     depends_on:
       postgres:
         condition: service_healthy
