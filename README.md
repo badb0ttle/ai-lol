@@ -324,7 +324,6 @@ hjh-ai-lol/
 ├── .env.dev                # 环境变量（不提交）
 ├── .env.example            # 环境变量模板
 ├── FastAPI.openapi.json    # OpenAPI 3.0 规范（可导入 Swagger/Apifox）
-├── demo.sh                 # 端到端演示脚本
 ├── README.md
 │
 ├── alembic/
