@@ -111,7 +111,7 @@ async def chat(req: ChatRequest):
             resp = await client.post(
                 f"{settings.llm_base_url}/v1/chat/completions",
                 headers={"Authorization": f"Bearer {settings.llm_api_key}"},
-                json=req.model_dump(),
+                json={"model": req.model, "messages": req.messages},
             )
             resp.raise_for_status()
             result = resp.json()
@@ -157,7 +157,7 @@ async def chat_stream(req: ChatRequest, request: Request):
                 async with client.stream(
                     "POST",
                     f"{settings.llm_base_url}/v1/chat/completions",
-                    json={**req.model_dump(), "stream": True},
+                    json={"model": req.model, "messages": req.messages, "stream": True},
                     headers={"Authorization": f"Bearer {settings.llm_api_key}"},
                 ) as resp:
                     async for line in resp.aiter_lines():
