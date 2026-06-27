@@ -1,5 +1,7 @@
 import asyncio
 import json
+import logging
+import time
 
 import aio_pika
 import redis.asyncio as aioredis
@@ -9,6 +11,13 @@ from app.config import settings
 from app.db import async_session
 from app.models import Task, TaskStatus
 
+logger = logging.getLogger("worker")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+
 
 async def process_message(
     message: aio_pika.IncomingMessage,
@@ -16,12 +25,15 @@ async def process_message(
     channel: aio_pika.Channel,
 ) -> None:
     retry_count = 0
+    t0 = time.monotonic()
     try:
         body = json.loads(message.body.decode())
         task_id = body["task_id"]
         instruction = body["instruction"]
         context = body.get("context", "")
         retry_count = int((message.headers or {}).get("x-retry-count", 3))
+
+        logger.info("📥 收到任务 task=%s retry=%d | %s", task_id[:8], retry_count, instruction[:60])
 
         async with async_session() as db:
             task = await db.get(Task, task_id)
@@ -46,6 +58,8 @@ async def process_message(
             await db.commit()
             await redis_client.delete(f"task:{task_id}")
 
+        logger.info("▶️  开始执行 task=%s", task_id[:8])
+
         async with async_session() as db:
             result = await asyncio.wait_for(
                 run_agent(instruction, context, db, task_id),
@@ -60,8 +74,12 @@ async def process_message(
             task.result = result
             await db.commit()
             await redis_client.delete(f"task:{task_id}")
+        elapsed = time.monotonic() - t0
+        logger.info("✅ 任务完成 task=%s 耗时=%.1fs | %s", task_id[:8], elapsed, (result or "")[:80])
         await message.ack()
     except Exception as exc:
+        elapsed = time.monotonic() - t0
+        logger.error("❌ 任务失败 task=%s 耗时=%.1fs | %s", task_id[:8] if task_id else "?", elapsed, exc)
         try:
             body = json.loads(message.body.decode())
             task_id = body.get("task_id")

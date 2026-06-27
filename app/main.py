@@ -1,6 +1,6 @@
 from fastapi import FastAPI
-from contextlib import asynccontextmanager
 from fastapi.responses import StreamingResponse
+from contextlib import asynccontextmanager
 from fastapi import APIRouter
 from pydantic import BaseModel
 from fastapi import Request
@@ -16,7 +16,9 @@ import httpx
 from app.config import settings
 import aio_pika
 from uuid import uuid4
-from sqlalchemy import IntegrityError, select as sa_select
+from sqlalchemy import select as sa_select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 
 
 # 生命周期管理
@@ -68,6 +70,21 @@ app.include_router(router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/")
+async def root():
+    return {
+        "service": "AI Task Backend",
+        "endpoints": {
+            "health": "GET /health",
+            "chat": "POST /chat",
+            "chat_stream": "POST /chat/stream",
+            "submit_task": "POST /tasks",
+            "get_task": "GET /tasks/{task_id}",
+        },
+        "docs": "FastAPI.openapi.json (OpenAPI 3.0 规范)",
+    }
 
 
 @app.post("/chat")
@@ -143,7 +160,7 @@ async def chat_stream(req: ChatRequest, request: Request):
                 async with client.stream(
                     "POST",
                     f"{settings.llm_base_url}/v1/chat/completions",
-                    json=req.model_dump(),
+                    json={**req.model_dump(), "stream": True},
                     headers={"Authorization": f"Bearer {settings.llm_api_key}"},
                 ) as resp:
                     async for line in resp.aiter_lines():
@@ -162,7 +179,7 @@ async def chat_stream(req: ChatRequest, request: Request):
                                     chunk.get("choices", [{}])[0]
                                     .get("delta", {})
                                 )
-                                if "content" in delta:
+                                if delta.get("content"):
                                     full_content += delta["content"]
                             except (json.JSONDecodeError, KeyError, IndexError):
                                 pass
@@ -270,7 +287,9 @@ async def get_task(task_id: str, request: Request):
         except json.JSONDecodeError:
             await redis_client.delete(f"task:{task_id}")
     async with async_session() as db:
-        task = await db.get(Task, task_id)
+        stmt = sa_select(Task).options(selectinload(Task.steps)).where(Task.id == task_id)
+        result = await db.execute(stmt)
+        task = result.scalar_one_or_none()
         if not task:
             raise HTTPException(status_code=404, detail="task not found")
         result = {

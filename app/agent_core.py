@@ -1,6 +1,10 @@
 import ast
+import asyncio
 import json
 import os
+import pathlib
+import shlex
+import subprocess
 from datetime import datetime, timezone
 from typing import Any
 
@@ -54,17 +58,21 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "file_reader",
-            "description": "读取 data 目录下的文件内容",
+            "name": "run_command",
+            "description": (
+                "在 data 目录下执行只读命令，支持：cat、head、tail、wc、grep、sort、"
+                "uniq、cut、tr、find、ls、file、stat、echo、date、expr、test。"
+                "命令超时 10 秒，输出上限 3000 字符。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {
+                    "command": {
                         "type": "string",
-                        "description": "相对 data 目录的文件路径",
+                        "description": "要执行的命令（不含管道和重定向）",
                     }
                 },
-                "required": ["path"],
+                "required": ["command"],
             },
         },
     },
@@ -134,15 +142,54 @@ BASE_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 
 
 async def execute_tool(name: str, args: dict[str, Any]) -> Any:
-    # 防路径穿越
-    if name == "file_reader":
-        path = str(args.get("path", ""))
-        full = os.path.normpath(os.path.join(BASE_DIR, path))
-        if not full.startswith(os.path.normpath(BASE_DIR) + os.sep):
-            raise ValueError("路径越界")
-        with open(full) as f:
-            content = f.read()[:5000]
-        return {"path": path, "content": content}
+    # 安全沙箱：仅白名单命令，限制在 data 目录
+    if name == "run_command":
+        ALLOWED = {
+            "cat", "head", "tail", "wc", "grep", "sort", "uniq",
+            "cut", "tr", "find", "ls", "file", "stat", "echo", "date", "expr", "test",
+        }
+        raw = str(args.get("command", ""))
+        tokens = shlex.split(raw)
+        if not tokens:
+            raise ValueError("命令不能为空")
+        if tokens[0] not in ALLOWED:
+            raise ValueError(f"命令不在白名单: {tokens[0]}")
+        # 禁止管道、重定向和路径穿越
+        for tok in tokens:
+            if tok in {"|", ">", ">>", "<", "&&", "||", ";", "&"}:
+                raise ValueError(f"禁止的操作符: {tok}")
+        # 检查所有路径参数，防止越界
+        base = pathlib.Path(BASE_DIR).resolve()
+        for tok in tokens[1:]:
+            # 跳过不以路径开头的参数（如 -l, -la, 数字）
+            if tok.startswith("-") or tok.lstrip(".").isdigit():
+                continue
+            try:
+                full = (base / tok).resolve()
+                if not str(full).startswith(str(base) + os.sep) and full != base:
+                    raise ValueError(f"路径越界: {tok}")
+            except Exception:
+                raise ValueError(f"无效路径: {tok}")
+        proc = await asyncio.create_subprocess_exec(
+            *tokens,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=BASE_DIR,
+            limit=3000,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=10
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return {"error": "命令执行超时 (10s)"}
+        return {
+            "stdout": stdout.decode(errors="replace"),
+            "stderr": stderr.decode(errors="replace"),
+            "exit_code": proc.returncode,
+        }
 
     if name == "fetch_url":
         url = str(args.get("url", ""))

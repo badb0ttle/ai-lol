@@ -26,3 +26,5 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 COPY app/ ./app/
 COPY data/ ./data/
+COPY alembic.ini ./
+COPY alembic/ ./alembic/

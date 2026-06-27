@@ -4,19 +4,21 @@
 
 ---
 
-## 项目概述
+## 零依赖启动
 
-| 能力 | 实现 |
-|------|------|
-| 异步执行 | `POST /tasks` 投递到 RabbitMQ → Worker 消费 → Agent 循环 |
-| 全链路持久化 | 每一步工具调用（think → tool_call → tool_result → reply）记录到 PostgreSQL |
-| 失败可复盘 | `GET /tasks/{id}` 返回完整 steps 序列 |
-| 幂等去重 | Redis SET NX + PostgreSQL UNIQUE 双层保护 |
-| 任务超时 | `asyncio.wait_for` 包裹 Agent 执行 |
-| 工具重试 | 每个工具调用最多 2 次尝试 |
-| 缓存加速 | `GET /tasks/{id}` Redis 读缓存，Worker 更新后主动失效 |
-| 死信队列 | 3 次重试耗尽 → 入 `ai_tasks.dlq`，消息不丢失 |
-| 一键启动 | `docker compose up -d`，Alembic 迁移自动执行 |
+**唯一前提：安装了 Docker Desktop。**
+
+```bash
+git clone <repo-url> && cd hjh-ai-lol
+cp .env.example .env.dev    # 填入 LLM_API_KEY
+docker compose up -d         # 启动 5 个容器
+```
+
+一行命令拉起全部服务——不需要装 Python、PostgreSQL、Redis、RabbitMQ、Apifox 或任何其他工具。所有基础设施都在容器里。
+
+```bash
+curl http://localhost:8000/health   # → {"status":"ok"}
+```
 
 ---
 
@@ -34,39 +36,30 @@
 │       │              │              │                     │
 │  ┌────┴──────────────┴──────────────┴───────┐            │
 │  │              FastAPI :8000                │            │
+│  │  GET  /               (API 总览)          │            │
 │  │  POST /chat           (同步对话)          │            │
 │  │  POST /chat/stream    (SSE 流式)         │            │
 │  │  POST /tasks          (提交异步任务)      │            │
-│  │  GET  /tasks/{id}     (查询任务状态)      │            │
+│  │  GET  /tasks/{id}     (查询任务+步骤)     │            │
 │  │  GET  /health         (健康检查)          │            │
 │  └──────────────────┬────────────────────────┘            │
 │                     │ publish                              │
 │  ┌──────────────────▼────────────────────────┐            │
-│  │            Worker (独立子进程)              │            │
+│  │            Worker (独立进程)                │            │
 │  │  ┌──────────────────────────────────┐     │            │
 │  │  │       Agent (ReAct 循环)          │     │            │
 │  │  │  调 LLM → 解析 tool_call         │     │            │
 │  │  │  → 执行工具 → 记录 step → 循环   │     │            │
 │  │  └──────────────────────────────────┘     │            │
-│  │  工具: get_current_time / calculate       │            │
-│  │        fetch_url / file_reader            │            │
 │  │                                           │            │
-│  │  可靠性: 工具重试 2 次                     │            │
-│  │          任务超时 asyncio.wait_for         │            │
+│  │  工具: get_current_time / calculate       │            │
+│  │        fetch_url / run_command            │            │
+│  │                                           │            │
+│  │  可靠性: 工具重试 + 任务超时               │            │
 │  │          死信队列 3 次重试 → DLQ           │            │
 │  └───────────────────────────────────────────┘            │
 └────────────────────────────────────────────────────────────┘
 ```
-
----
-
-## 三条请求路线
-
-| 路线 | 接口 | 延迟 | 适用场景 |
-|------|------|------|---------|
-| 同步对话 | `POST /chat` | 1-5s | 简单问答、翻译 |
-| SSE 流式 | `POST /chat/stream` | 流式输出 | 长文生成、代码生成 |
-| 异步任务 | `POST /tasks` → Worker | 30-120s | 多步工具调用 |
 
 ---
 
@@ -85,124 +78,26 @@
 
 ---
 
-## 快速启动
+## 三条请求路线
 
-```bash
-# 1. 克隆 + 配置
-git clone <repo-url> && cd hjh-ai-lol
-cp .env.example .env.dev    # 编辑填入 LLM_API_KEY
-
-# 2. 一键启动（Alembic 迁移自动执行）
-docker compose up -d
-
-# 3. 验证
-curl http://localhost:8000/health
-# → {"status":"ok"}
-
-# 4. 端到端演示
-./demo.sh
-```
-
-**服务端口：**
-
-| 服务 | 端口 | 用途 |
-|------|------|------|
-| FastAPI | 8000 | API 服务 |
-| PostgreSQL | 5432 | 数据库 |
-| Redis | 6379 | 缓存 |
-| RabbitMQ | 5672 | AMQP |
-| RabbitMQ 管理 | 15672 | 队列监控 (dev/devpass123) |
+| 路线 | 接口 | 延迟 | 适用场景 |
+|------|------|------|---------|
+| 同步对话 | `POST /chat` | 1-5s | 简单问答、翻译 |
+| SSE 流式 | `POST /chat/stream` | 流式输出 | 长文生成、代码生成 |
+| 异步任务 | `POST /tasks` → Worker | 30-120s | 多步工具调用（核心） |
 
 ---
 
-## 环境变量
+## 工具
 
-| 变量 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `LLM_API_KEY` | ✅ | — | DeepSeek API 密钥 |
-| `LLM_BASE_URL` | — | `https://api.deepseek.com` | 兼容 OpenAI 接口格式 |
-| `LLM_MODEL` | — | `deepseek-v4-flash` | 模型名 |
-| `LLM_TIMEOUT` | — | `60` | 单次 LLM 调用超时（秒） |
-| `MAX_LOOPS` | — | `10` | Agent 最大工具调用轮数 |
-| `TASK_TIMEOUT` | — | `120` | 单任务总超时（秒） |
-| `DATABASE_URL` | — | `postgresql+asyncpg://dev:***@postgres:5432/ai_tasks` | 本地开发用 `127.0.0.1` |
-| `REDIS_URL` | — | `redis://redis:6379` | Redis 连接串 |
-| `AMQP_URL` | — | `amqp://dev:***@rabbitmq:5672/` | RabbitMQ 连接串 |
+| 工具 | 功能 | 安全措施 |
+|------|------|---------|
+| `get_current_time` | 返回 UTC 当前时间 | 无参数 |
+| `calculate` | 安全数学表达式求值 | AST 白名单 + 禁用 `__builtins__` |
+| `fetch_url` | HTTP GET 抓取网页 | 10s 超时，截断 2000 字符 |
+| `run_command` | 在 `/app/data/` 下执行白名单命令 | 禁止绝对路径和 `..`、禁止管道重定向、命令白名单、10s 超时 |
 
----
-
-## API 文档
-
-### `POST /chat` — 同步对话
-
-```bash
-curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "deepseek-v4-flash",
-    "messages": [
-      {"role": "user", "content": "你好，请用三句话介绍你自己"}
-    ]
-  }'
-```
-
-### `POST /chat/stream` — SSE 流式
-
-```bash
-curl -N -X POST http://localhost:8000/chat/stream \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "deepseek-v4-flash",
-    "messages": [
-      {"role": "user", "content": "写一首关于秋天的五言诗"}
-    ]
-  }'
-```
-
-响应逐块推送 `data:` 行。
-
-### `POST /tasks` — 提交异步任务
-
-```bash
-curl -X POST http://localhost:8000/tasks \
-  -H "Content-Type: application/json" \
-  -d '{
-    "instruction": "读取 data/README.md 并总结要点",
-    "context": "这是一个演示任务",
-    "idempotent_key": "optional-key"
-  }'
-```
-
-响应（立即返回）：
-
-```json
-{"status": "queued", "task_id": "a1b2c3d4-..."}
-```
-
-### `GET /tasks/{id}` — 查询任务状态
-
-```bash
-curl http://localhost:8000/tasks/a1b2c3d4-...
-```
-
-响应（任务完成后）：
-
-```json
-{
-  "task_id": "a1b2c3d4-...",
-  "status": "success",
-  "result": "该项目的核心是...",
-  "error": null,
-  "steps": [
-    {"seq": 1, "type": "think",     "content": "...", "tool_name": null},
-    {"seq": 2, "type": "tool_call", "content": "{"name":"file_reader",...}", "tool_name": "file_reader"},
-    {"seq": 3, "type": "tool_result", "content": "{"path":"README.md",...}", "tool_name": "file_reader"},
-    {"seq": 4, "type": "reply",     "content": "该项目的核心是...", "tool_name": null}
-  ],
-  "created_at": "2026-06-27T10:30:00+00:00",
-  "updated_at": "2026-06-27T10:30:12+00:00"
-}
-```
+工具定义在 `app/agent_core.py` 的 `TOOLS` 列表中，OpenAI 兼容 function calling 格式（DeepSeek 原生支持）。
 
 ---
 
@@ -236,19 +131,6 @@ POST /tasks → RabbitMQ → Worker 消费
         │   └── = 0 → 入死信队列 ai_tasks.dlq
         └── 超时 (asyncio.wait_for) → status=failed
 ```
-
----
-
-## 工具
-
-| 工具 | 功能 | 安全措施 |
-|------|------|---------|
-| `get_current_time` | 返回 UTC 当前时间 | 无参数 |
-| `calculate` | 安全数学表达式求值 | AST 白名单 + 禁用 `__builtins__` |
-| `fetch_url` | HTTP GET 抓取网页 | 10s 超时，截断 2000 字符 |
-| `file_reader` | 读取 `data/` 目录下文件 | `normpath` 防路径穿越，截断 5000 字符 |
-
-工具定义在 `app/agent_core.py` 的 `TOOLS` 列表中，OpenAI 兼容 function calling 格式（DeepSeek 原生支持）。
 
 ---
 
@@ -290,6 +172,103 @@ POST /tasks (idempotent_key = "abc")
 
 ---
 
+## API 文档
+
+请求/响应的完整 Schema 见 `FastAPI.openapi.json`（OpenAPI 3.0 规范）。可导入 Swagger Editor、Apifox、或任意 OpenAPI 查看器。
+
+### `POST /tasks` — 提交异步任务（核心接口）
+
+```bash
+curl -X POST http://localhost:8000/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "instruction": "用 run_command 读取 data/readme.txt 并总结内容",
+    "context": "演示任务",
+    "idempotent_key": "optional-key"
+  }'
+```
+
+响应（立即返回）：
+
+```json
+{"status": "queued", "task_id": "a1b2c3d4-..."}
+```
+
+### `GET /tasks/{id}` — 查询任务状态与执行步骤
+
+```bash
+curl http://localhost:8000/tasks/a1b2c3d4-...
+```
+
+响应（任务完成后）：
+
+```json
+{
+  "task_id": "a1b2c3d4-...",
+  "status": "success",
+  "result": "该项目的核心功能是...",
+  "error": null,
+  "steps": [
+    {"seq": 1, "type": "think",       "tool_name": null,          "content": "我先读取文件..."},
+    {"seq": 2, "type": "tool_call",   "tool_name": "run_command", "content": "{\"command\":\"cat data/readme.txt\"}"},
+    {"seq": 3, "type": "tool_result", "tool_name": "run_command", "content": "{\"output\":\"# AI Task Backend...\"}"},
+    {"seq": 4, "type": "think",       "tool_name": null,          "content": "文件读取成功，内容包含..."},
+    {"seq": 5, "type": "reply",       "tool_name": null,          "content": "该项目的核心功能是..."}
+  ],
+  "created_at": "2026-06-27T10:30:00+00:00",
+  "updated_at": "2026-06-27T10:30:12+00:00"
+}
+```
+
+### 其他接口速查
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/` | GET | API 概览（返回所有可用端点） |
+| `/health` | GET | 健康检查 |
+| `/chat` | POST | 同步对话（持久化到 conversations/messages 表） |
+| `/chat/stream` | POST | SSE 流式对话 |
+| `/tasks` | POST | 提交异步任务 |
+| `/tasks/{task_id}` | GET | 查询任务（含完整步骤链） |
+
+---
+
+## 全链路审计
+
+### 通过 API 查询
+
+```bash
+# 查看单个任务的完整执行链（think → tool_call → tool_result → reply）
+curl http://localhost:8000/tasks/{task_id}
+```
+
+### 通过数据库查询（直连容器内 PostgreSQL）
+
+无需安装 psql，直接用 `docker exec` 进入容器：
+
+```bash
+# 连接数据库
+docker exec hjh-ai-lol-postgres-1 psql -U dev -d ai_tasks
+
+# 1. 所有会话
+SELECT id, title, created_at FROM conversations ORDER BY created_at DESC;
+
+# 2. 某个会话的全部消息
+SELECT role, content FROM messages WHERE conversation_id = 'xxx' ORDER BY created_at;
+
+# 3. 所有任务（含状态和失败原因）
+SELECT id, status,
+       CASE WHEN error IS NOT NULL THEN SUBSTRING(error,1,80) END AS error_snippet,
+       created_at
+FROM tasks ORDER BY created_at DESC;
+
+# 4. 某任务的执行步骤（工具调用入参出参）
+SELECT seq, type, tool_name, SUBSTRING(content,1,100)
+FROM task_steps WHERE task_id = 'xxx' ORDER BY seq;
+```
+
+---
+
 ## Redis 缓存策略
 
 ```
@@ -311,11 +290,27 @@ Worker 更新 task 状态时 → DELETE "task:{id}" 主动失效
 | 表 | 用途 |
 |----|------|
 | `conversations` | 会话记录 |
-| `messages` | 对话消息 (system/user/assistant/tool) |
+| `messages` | 对话消息 (user/assistant/tool) |
 | `tasks` | 异步任务 (idempotent_key UNIQUE) |
 | `task_steps` | Agent 执行步骤 (think/tool_call/tool_result/reply) |
 
 迁移在 API 容器启动时自动执行：`alembic upgrade head && uvicorn ...`
+
+---
+
+## 环境变量
+
+| 变量 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| `LLM_API_KEY` | ✅ | — | DeepSeek API 密钥 |
+| `LLM_BASE_URL` | — | `https://api.deepseek.com` | 兼容 OpenAI 接口格式 |
+| `LLM_MODEL` | — | `deepseek-v4-flash` | 模型名 |
+| `LLM_TIMEOUT` | — | `60` | 单次 LLM 调用超时（秒） |
+| `MAX_LOOPS` | — | `10` | Agent 最大工具调用轮数 |
+| `TASK_TIMEOUT` | — | `120` | 单任务总超时（秒） |
+| `DATABASE_URL` | — | `postgresql+asyncpg://dev:devpass123@postgres:5432/ai_tasks` | 本地开发用 `127.0.0.1` |
+| `REDIS_URL` | — | `redis://redis:6379` | Redis 连接串 |
+| `AMQP_URL` | — | `amqp://dev:devpass123@rabbitmq:5672/` | RabbitMQ 连接串 |
 
 ---
 
@@ -327,6 +322,8 @@ hjh-ai-lol/
 ├── Dockerfile              # 多阶段构建 (builder + runtime)
 ├── pyproject.toml          # 依赖声明
 ├── .env.dev                # 环境变量（不提交）
+├── .env.example            # 环境变量模板
+├── FastAPI.openapi.json    # OpenAPI 3.0 规范（可导入 Swagger/Apifox）
 ├── demo.sh                 # 端到端演示脚本
 ├── README.md
 │
@@ -343,7 +340,8 @@ hjh-ai-lol/
 │   ├── db.py               # 异步引擎 + sessionmaker
 │   └── config.py           # 配置 (pydantic-settings)
 │
-└── data/                   # file_reader 安全文件区
+└── data/                   # run_command 安全文件区
+    ├── readme.txt          # 演示用文件
     └── .gitkeep
 ```
 
@@ -366,27 +364,50 @@ hjh-ai-lol/
 ## 演示验收
 
 ```bash
-# 1. 提交异步任务（带文件读取）
+# 1. 启动
+docker compose up -d
+curl http://localhost:8000/health   # 确认就绪
+
+# 2. 提交异步任务
 curl -X POST http://localhost:8000/tasks \
   -H "Content-Type: application/json" \
   -d '{
-    "instruction": "读取 data/ 目录下 README.md 并总结这个项目的核心功能",
+    "instruction": "用 run_command 读取 data/readme.txt，总结项目核心功能",
     "context": ""
   }'
 # → {"status":"queued","task_id":"xxx-..."}
 
-# 2. 查询状态
+# 3. 查询状态 + 步骤链
 curl http://localhost:8000/tasks/xxx-...
 
-# 3. 幂等验证
+# 4. 查看 Worker 实时日志
+docker logs -f hjh-ai-lol-worker-1
+
+# 5. 幂等验证
 curl -X POST http://localhost:8000/tasks \
   -H "Content-Type: application/json" \
   -d '{"instruction":"test","idempotent_key":"demo-001"}'
 # 第二次同 key → {"status":"duplicate","task_id":"..."}
 
-# 4. 一键全流程
+# 6. 数据库全链路审计
+docker exec hjh-ai-lol-postgres-1 psql -U dev -d ai_tasks \
+  -c "SELECT seq, type, tool_name, SUBSTRING(content,1,100) FROM task_steps WHERE task_id='xxx' ORDER BY seq;"
+
+# 7. 一键全流程
 ./demo.sh
 ```
+
+---
+
+## OpenAPI 规范文件
+
+`FastAPI.openapi.json` —— 当前 API 的完整 OpenAPI 3.0 规范，包含所有接口的请求/响应 Schema、字段类型和示例。
+
+**使用方式：**
+- 导入 [Swagger Editor](https://editor.swagger.io) 在线预览（粘贴或拖入文件）
+- 导入 Apifox / Postman 自动生成请求集合
+- 用 `openapi-generator` 生成客户端 SDK
+- 贴给 ChatGPT / Claude 让 AI 理解接口结构
 
 ---
 
@@ -397,7 +418,7 @@ curl -X POST http://localhost:8000/tasks \
 3. **无速率限制**：可无限提交。生产需 slowapi 令牌桶
 4. **LLM 单一 provider**：仅 DeepSeek。生产需抽象 `BaseLLMProvider` + fallback
 5. **无监控**：无 Prometheus/Grafana。需补齐队列深度、延迟、失败率仪表盘
-6. **Tool sandbox 有限**：`fetch_url` SSRF 防护简化。生产需 Firecracker/gVisor 沙箱
+6. **Tool sandbox 有限**：`run_command` 白名单 + 路径限制。生产需 Firecracker/gVisor 沙箱
 
 ---
 
