@@ -13,12 +13,15 @@ from app.models import Task, TaskStatus
 async def process_message(
     message: aio_pika.IncomingMessage,
     redis_client: aioredis.Redis,
+    channel: aio_pika.Channel,
 ) -> None:
-    async with message.process():
+    retry_count = 0
+    try:
         body = json.loads(message.body.decode())
         task_id = body["task_id"]
         instruction = body["instruction"]
         context = body.get("context", "")
+        retry_count = int((message.headers or {}).get("x-retry-count", 3))
 
         async with async_session() as db:
             task = await db.get(Task, task_id)
@@ -26,6 +29,7 @@ async def process_message(
                 TaskStatus.success,
                 TaskStatus.running,
             ):
+                await message.ack()
                 return
             if task is None:
                 task = Task(
@@ -42,23 +46,29 @@ async def process_message(
             await db.commit()
             await redis_client.delete(f"task:{task_id}")
 
-        try:
-            async with async_session() as db:
-                # 任务超时
-                result = await asyncio.wait_for(
-                    run_agent(instruction, context, db, task_id),
-                    timeout=settings.task_timeout,
-                )
+        async with async_session() as db:
+            result = await asyncio.wait_for(
+                run_agent(instruction, context, db, task_id),
+                timeout=settings.task_timeout,
+            )
 
-            async with async_session() as db:
-                task = await db.get(Task, task_id)
-                if task is None:
-                    raise RuntimeError(f"task not found: {task_id}")
-                task.status = TaskStatus.success
-                task.result = result
-                await db.commit()
-                await redis_client.delete(f"task:{task_id}")
-        except Exception as exc:
+        async with async_session() as db:
+            task = await db.get(Task, task_id)
+            if task is None:
+                raise RuntimeError(f"task not found: {task_id}")
+            task.status = TaskStatus.success
+            task.result = result
+            await db.commit()
+            await redis_client.delete(f"task:{task_id}")
+        await message.ack()
+    except Exception as exc:
+        try:
+            body = json.loads(message.body.decode())
+            task_id = body.get("task_id")
+        except Exception:
+            task_id = None
+
+        if task_id is not None:
             async with async_session() as db:
                 task = await db.get(Task, task_id)
                 if task is not None:
@@ -67,12 +77,38 @@ async def process_message(
                     await db.commit()
                     await redis_client.delete(f"task:{task_id}")
 
+            try:
+                if retry_count > 0:
+                    await channel.default_exchange.publish(
+                        aio_pika.Message(
+                            body=message.body,
+                            headers={"x-retry-count": retry_count - 1},
+                        ),
+                        routing_key="ai_tasks",
+                    )
+                else:
+                    await channel.default_exchange.publish(
+                        aio_pika.Message(
+                            body=message.body,
+                            headers={"x-error": str(exc)},
+                        ),
+                        routing_key="ai_tasks.dlq",
+                    )
+                await message.ack()
+                return
+            except Exception:
+                await message.nack(requeue=True)
+                return
+
+        await message.nack(requeue=True)
+
 
 async def consume_message(
     message: aio_pika.IncomingMessage,
     redis_client: aioredis.Redis,
+    channel: aio_pika.Channel,
 ) -> None:
-    await process_message(message, redis_client)
+    await process_message(message, redis_client, channel)
 
 
 async def main() -> None:
@@ -80,10 +116,11 @@ async def main() -> None:
     conn = await aio_pika.connect_robust(settings.amqp_url)
     channel = await conn.channel()
     await channel.set_qos(prefetch_count=1)
+    await channel.declare_queue("ai_tasks.dlq", durable=True)
     queue = await channel.declare_queue("ai_tasks", durable=True)
 
     async def on_message(message: aio_pika.IncomingMessage) -> None:
-        await consume_message(message, redis_client)
+        await consume_message(message, redis_client, channel)
 
     await queue.consume(on_message)
 

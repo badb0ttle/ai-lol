@@ -6,11 +6,12 @@ from pydantic import BaseModel
 from fastapi import Request
 from fastapi import HTTPException
 import json
+import asyncio
 from datetime import datetime
 import redis.asyncio as aioredis
 
 from app.db import async_session, engine, Base
-from app.models import Task
+from app.models import Conversation, Message, MessageRole, Task
 import httpx
 from app.config import settings
 import aio_pika
@@ -50,6 +51,7 @@ app = FastAPI(lifespan=lifespan)
 class ChatRequest(BaseModel):
     model: str = settings.llm_model
     messages: list[dict]  # 对话历史
+    conversation_id: str | None = None  # 续接已有会话
 
 
 class TaskRequest(BaseModel):
@@ -70,37 +72,123 @@ async def health():
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            f"{settings.llm_base_url}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {settings.llm_api_key}"},
-            json=req.model_dump(),
-        )
-        resp.raise_for_status()
-        return resp.json()
+    async with async_session() as db:
+        # 会话管理：传了 conversation_id 就续接，否则新建
+        if req.conversation_id:
+            conv = await db.get(Conversation, req.conversation_id)
+            if not conv:
+                raise HTTPException(404, "conversation not found")
+        else:
+            conv = Conversation()
+            db.add(conv)
+            await db.flush()
+
+        # 保存用户消息
+        user_msg = req.messages[-1]
+        db.add(Message(
+            conversation_id=conv.id,
+            role=MessageRole.user,
+            content=user_msg["content"],
+        ))
+        await db.commit()
+
+        # 调用 LLM
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{settings.llm_base_url}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+                json=req.model_dump(),
+            )
+            resp.raise_for_status()
+            result = resp.json()
+
+        # 保存助手回复
+        assistant_content = result["choices"][0]["message"]["content"]
+        db.add(Message(
+            conversation_id=conv.id,
+            role=MessageRole.assistant,
+            content=assistant_content,
+        ))
+        await db.commit()
+
+        return {"conversation_id": conv.id, **result}
 
 
 @router.post("/chat/stream")
-async def chat_stream(req: ChatRequest):
-    async def event_generator():
-        async with httpx.AsyncClient() as client:
-            async with client.stream(
-                "POST",
-                f"{settings.llm_base_url}/v1/chat/completions",
-                json=req.model_dump(),
-                headers={"Authorization": f"Bearer {settings.llm_api_key}"},
-            ) as resp:
-                async for line in resp.aiter_lines():
-                    if line.startswith("data: "):
-                        yield f"data: {line[6:]}\n\n"
+async def chat_stream(req: ChatRequest, request: Request):
+    # 会话管理（先建好会话，再返回流）
+    async with async_session() as db:
+        if req.conversation_id:
+            conv = await db.get(Conversation, req.conversation_id)
+            if not conv:
+                raise HTTPException(404, "conversation not found")
+        else:
+            conv = Conversation()
+            db.add(conv)
+            await db.flush()
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+        user_msg = req.messages[-1]
+        db.add(Message(
+            conversation_id=conv.id,
+            role=MessageRole.user,
+            content=user_msg["content"],
+        ))
+        await db.commit()
+        conv_id = conv.id  # 闭包捕获，db session 关闭后仍可用
+
+    async def event_generator():
+        full_content = ""
+        try:
+            async with httpx.AsyncClient() as client:
+                async with client.stream(
+                    "POST",
+                    f"{settings.llm_base_url}/v1/chat/completions",
+                    json=req.model_dump(),
+                    headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+                ) as resp:
+                    async for line in resp.aiter_lines():
+                        # 客户端断连 → 停止消费上游
+                        if await request.is_disconnected():
+                            break
+                        if line.startswith("data: "):
+                            payload = line[6:]
+                            if payload == "[DONE]":
+                                break
+                            yield f"data: {payload}\n\n"
+                            # 累积文本内容
+                            try:
+                                chunk = json.loads(payload)
+                                delta = (
+                                    chunk.get("choices", [{}])[0]
+                                    .get("delta", {})
+                                )
+                                if "content" in delta:
+                                    full_content += delta["content"]
+                            except (json.JSONDecodeError, KeyError, IndexError):
+                                pass
+        except asyncio.CancelledError:
+            # 客户端断开时 asyncio 会取消生成器
+            pass
+        finally:
+            # 无论如何，保存已收到的内容（包括断开时的半截回复）
+            if full_content:
+                async with async_session() as db:
+                    db.add(Message(
+                        conversation_id=conv_id,
+                        role=MessageRole.assistant,
+                        content=full_content,
+                    ))
+                    await db.commit()
+
+    return StreamingResponse(
+        event_generator(), media_type="text/event-stream"
+    )
 
 
 @router.post("/tasks")
 async def submit_task(req: TaskRequest, request: Request):
     task_id = str(uuid4())
-    now = datetime.utcnow().isoformat()
+    now = datetime.now().isoformat()
     async with async_session() as db:
         if req.idempotent_key:
             redis_client = request.app.state.redis
@@ -148,7 +236,8 @@ async def submit_task(req: TaskRequest, request: Request):
                     "context": req.context,
                 },
                 ensure_ascii=False,
-            ).encode()
+            ).encode(),
+            headers={"x-retry-count": 3},# 重试次数
         ),
         routing_key="ai_tasks",
     )
